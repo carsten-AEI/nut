@@ -134,6 +134,10 @@ static	struct sigaction sa;
 static	sigset_t nut_upsmon_sigmask;
 #endif
 
+/* minimum charge and runtime left before we consider a UPS to be critical */
+static	double	min_charge = 10.0;		/* percent */
+static	double	min_runtime = 100.0;	/* seconds */
+
 #ifdef HAVE_SYSTEMD
 # define SERVICE_UNIT_NAME "nut-monitor.service"
 #endif
@@ -928,6 +932,13 @@ static int get_var(utype_t *ups, const char *var, char *buf, size_t bufsize)
 		numq = 3;
 	}
 
+	if (!strncmp(var, "battery", 7)) {
+		query[0] = "VAR";
+		query[1] = ups->upsname;
+		query[2] = var;
+		numq = 3;
+	}
+
 	if (numq == 0) {
 		upslogx(LOG_ERR, "get_var: programming error: var=%s", var);
 		return -1;
@@ -1051,6 +1062,9 @@ static int is_ups_critical(utype_t *ups)
 {
 	time_t	now;
 
+	char    buf[32];
+	double  charge = 100.0, runtime = 1000.0;
+
 	/* FSD = the primary is forcing a shutdown, or a driver forwarded the flag
 	 * from a smarter UPS depending on vendor protocol, ability and settings
 	 * (e.g. is charging but battery too low to guarantee safety to the load)
@@ -1100,6 +1114,22 @@ static int is_ups_critical(utype_t *ups)
 		upslogx(LOG_WARNING,
 			"UPS [%s] is reported as (administratively) OFF",
 			ups->sys);
+
+	/* query ups for battery charge and estimated run time */
+	if (get_var(ups, "battery.charge", buf, sizeof(buf)) >= 0)
+		charge = strtod(buf, NULL);
+	if (get_var(ups, "battery.runtime", buf, sizeof(buf)) >= 0)
+		runtime = strtod(buf, NULL);
+
+	upsdebugx(3, "%s: %s got charge %lf, runtime %lf", __func__, ups->sys, charge, runtime);
+
+	/* consider this UPS critical unless minimum runtime or charge
+	 * levels are met
+	 */
+	if (charge < min_charge || runtime < min_runtime) {
+		upsdebugx(3, "%s: %s is considered critical:", __func__, ups->sys);
+		upsdebugx(3, "%s: estimated charge %lf, minimum %lf", __func__, charge, min_charge);
+		upsdebugx(3, "%s: estimated runtime %lf, minimum %lf", __func__, runtime, min_runtime);
 		return 1;
 	}
 
@@ -1781,6 +1811,17 @@ static int parse_conf_arg(size_t numargs, char **arg)
 		} else {
 			upslogx(LOG_INFO, "WARNING : Invalid DEBUG_MIN value found in upsmon.conf global settings");
 		}
+		return 1;
+	}
+
+	/* MIN_CHARGE <num> */
+	if (!strcmp(arg[0], "MIN_CHARGE")) {
+		min_charge = atof(arg[1]);
+		return 1;
+	}
+	/* MIN_RUNTIME <num> */
+	if (!strcmp(arg[0], "MIN_RUNTIME")) {
+		min_runtime = atof(arg[1]);
 		return 1;
 	}
 
